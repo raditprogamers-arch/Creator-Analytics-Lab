@@ -1,0 +1,28 @@
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+.streamlit/secrets.toml
+
+# Python & Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Neon
+node_modules/
+dist/
+.neon
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
