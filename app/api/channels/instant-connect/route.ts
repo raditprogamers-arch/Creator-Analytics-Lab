@@ -88,10 +88,91 @@ export async function POST(request: NextRequest) {
         .returning();
     }
 
+    // 3. Automatically fetch public videos for the channel (Zero API Key / Zero Google Cloud needed!)
+    let videosImported = 0;
+    if (platformName === "YouTube") {
+      try {
+        const ytRes = await fetch(`https://www.youtube.com/@${cleanHandle}`, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          },
+        });
+        if (ytRes.ok) {
+          const html = await ytRes.text();
+          const videoMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_\-]{11})"/g)];
+          const uniqueIds = [...new Set(videoMatches.map((v) => v[1]))].slice(0, 10);
+
+          for (const videoId of uniqueIds) {
+            try {
+              const oeRes = await fetch(
+                `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
+              );
+              if (oeRes.ok) {
+                const oeData = await oeRes.json();
+                const vTitle = oeData.title || `Video ${videoId}`;
+                const contentUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+                let cType = "long_form";
+                const tLower = vTitle.toLowerCase();
+                if (tLower.includes("cover") || tLower.includes("歌ってみた")) {
+                  cType = "music_cover";
+                } else if (tLower.includes("original") || tLower.includes("mv")) {
+                  cType = "original_song";
+                } else if (tLower.includes("stream") || tLower.includes("live")) {
+                  cType = "livestream";
+                }
+
+                // Check or insert into contents
+                const [existContent] = await db
+                  .select()
+                  .from(contents)
+                  .where(
+                    and(
+                      eq(contents.platformId, platformRecord.id),
+                      eq(contents.externalId, videoId)
+                    )
+                  );
+
+                let contentId: number;
+                if (!existContent) {
+                  const [newContent] = await db
+                    .insert(contents)
+                    .values({
+                      platformId: platformRecord.id,
+                      externalId: videoId,
+                      title: vTitle,
+                      contentType: cType,
+                      contentUrl,
+                      publishedAt: now,
+                    })
+                    .returning();
+                  contentId = newContent.id;
+                  videosImported++;
+                } else {
+                  contentId = existContent.id;
+                }
+              }
+            } catch (vErr) {
+              // Ignore single video fetch failure
+            }
+          }
+        }
+      } catch (scrapeErr) {
+        console.warn("Public channel scrape warning:", scrapeErr);
+      }
+    }
+
+    const message =
+      videosImported > 0
+        ? `Channel ${displayName} connected and synced ${videosImported} public videos to your catalog!`
+        : `Channel ${displayName} connected successfully!`;
+
     return NextResponse.json({
       success: true,
-      message: `Channel ${displayName} connected successfully!`,
+      message,
       account,
+      videosImported,
     });
   } catch (err: any) {
     console.error("Instant connect error:", err);
