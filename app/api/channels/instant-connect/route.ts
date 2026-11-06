@@ -15,8 +15,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const cleanHandle = handle.trim().replace(/^@/, "");
-    const displayName = channelTitle?.trim() || `@${cleanHandle}`;
+    let cleanHandle = handle.trim();
+    if (cleanHandle.includes("youtube.com/") || cleanHandle.includes("youtu.be/")) {
+      const match =
+        cleanHandle.match(/@([a-zA-Z0-9_\-\.]+)/) ||
+        cleanHandle.match(/(?:channel|c|user)\/([a-zA-Z0-9_\-\.]+)/);
+      if (match) cleanHandle = match[1];
+    } else if (cleanHandle.includes("tiktok.com/") || cleanHandle.includes("instagram.com/")) {
+      const match = cleanHandle.match(/@?([a-zA-Z0-9_\-\.]+)\/?$/);
+      if (match) cleanHandle = match[1];
+    }
+    cleanHandle = cleanHandle.replace(/^@/, "").replace(/\/$/, "");
+
+    const displayName = channelTitle?.trim() || cleanHandle;
 
     // 1. Resolve or create platform
     let [platformRecord] = await db

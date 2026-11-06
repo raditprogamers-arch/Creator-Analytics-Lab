@@ -2,18 +2,27 @@ import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import * as schema from "./schema";
 
-const connectionString = process.env.DATABASE_URL;
+export function getDb() {
+  const connectionString = process.env.DATABASE_URL;
 
-if (!connectionString) {
-  // We avoid throwing at build time if DATABASE_URL is temporarily unset during bundle analysis
-  if (process.env.NODE_ENV === "production" && !process.env.VERCEL_ENV) {
-    console.warn("WARNING: DATABASE_URL is not set.");
+  if (!connectionString || connectionString.includes("placeholder")) {
+    throw new Error(
+      "DATABASE_URL is not set in Vercel Environment Variables. Please add DATABASE_URL in Vercel Project Settings → Environment Variables and redeploy."
+    );
   }
+
+  const sql = neon(connectionString);
+  return drizzle(sql, { schema });
 }
 
-// Neon HTTP driver connection for serverless execution
-const sql = neon(
-  connectionString || "postgresql://placeholder:placeholder@localhost/placeholder"
-);
-
-export const db = drizzle(sql, { schema });
+// Dynamic Proxy to prevent baking placeholder connection strings during build
+export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
+  get(target, prop, receiver) {
+    const instance = getDb();
+    const value = Reflect.get(instance as any, prop, receiver);
+    if (typeof value === "function") {
+      return value.bind(instance);
+    }
+    return value;
+  },
+});
