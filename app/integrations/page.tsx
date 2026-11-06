@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { connectedAccounts } from "@/lib/db/schema";
 import { Header } from "@/components/layout/header";
 import { PlatformCard, ConnectedAccountData } from "@/components/integrations/platform-card";
+import { InstantConnect } from "@/components/integrations/instant-connect";
 import { getYouTubeConfig } from "@/lib/sync/youtube";
 import { getTikTokConfig } from "@/lib/sync/tiktok";
 import { getInstagramConfig } from "@/lib/sync/instagram";
@@ -110,15 +111,18 @@ export default async function IntegrationsPage({
           </div>
         )}
 
+        {/* Instant Channel Connect (Zero Setup) */}
+        <InstantConnect />
+
         {/* Info Banner */}
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="space-y-1">
             <h3 className="font-semibold text-slate-100 text-sm flex items-center gap-2">
               <Radio className="w-4 h-4 text-emerald-400" />
-              Automated Telemetry Sync Engine
+              Advanced OAuth 2.0 Live Telemetry Sync
             </h3>
             <p className="text-xs text-slate-400">
-              When connected, the sync engine queries platform APIs, extracts published video/music items, and appends timestamped metric snapshots to your Neon database.
+              For continuous real-time sync with Google and Meta APIs, you can optionally configure OAuth 2.0 Client credentials below.
             </p>
           </div>
         </div>
