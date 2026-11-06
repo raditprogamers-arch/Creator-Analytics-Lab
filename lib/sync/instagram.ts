@@ -237,6 +237,8 @@ export async function syncInstagramAccount(accountId: number): Promise<SyncResul
             contentType,
             publishedAt,
             contentUrl,
+            createdAt: now,
+            updatedAt: now,
           })
           .returning();
         contentId = created.id;
@@ -258,6 +260,7 @@ export async function syncInstagramAccount(accountId: number): Promise<SyncResul
           metricName: mName,
           metricValue: String(mVal),
           capturedAt: now,
+          createdAt: now,
         });
         snapshotsCreated++;
       }

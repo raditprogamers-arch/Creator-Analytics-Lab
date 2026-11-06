@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { connectedAccounts, platforms, contents, metricSnapshots } from "@/lib/db/schema";
+import { connectedAccounts, platforms } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
+import { syncConnectedAccount } from "@/lib/sync";
 
 export async function POST(request: NextRequest) {
   try {
@@ -35,6 +36,8 @@ export async function POST(request: NextRequest) {
       .from(platforms)
       .where(eq(platforms.name, platformName));
 
+    const now = new Date();
+
     if (!platformRecord) {
       const pType =
         platformName === "Spotify" || platformName === "Apple Music"
@@ -45,7 +48,7 @@ export async function POST(request: NextRequest) {
 
       [platformRecord] = await db
         .insert(platforms)
-        .values({ name: platformName, platformType: pType })
+        .values({ name: platformName, platformType: pType, createdAt: now })
         .returning();
     }
 
@@ -60,7 +63,6 @@ export async function POST(request: NextRequest) {
         )
       );
 
-    const now = new Date();
     let account;
 
     if (existing) {
@@ -68,7 +70,8 @@ export async function POST(request: NextRequest) {
         .update(connectedAccounts)
         .set({
           accountName: displayName,
-          syncStatus: "connected",
+          syncStatus: "syncing",
+          syncError: null,
           lastSyncedAt: now,
           updatedAt: now,
         })
@@ -82,97 +85,37 @@ export async function POST(request: NextRequest) {
           platformName,
           accountIdentifier: cleanHandle,
           accountName: displayName,
-          syncStatus: "connected",
+          syncStatus: "syncing",
+          syncError: null,
           lastSyncedAt: now,
+          createdAt: now,
+          updatedAt: now,
         })
         .returning();
     }
 
-    // 3. Automatically fetch public videos for the channel (Zero API Key / Zero Google Cloud needed!)
-    let videosImported = 0;
-    if (platformName === "YouTube") {
-      try {
-        const ytRes = await fetch(`https://www.youtube.com/@${cleanHandle}`, {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          },
-        });
-        if (ytRes.ok) {
-          const html = await ytRes.text();
-          const videoMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_\-]{11})"/g)];
-          const uniqueIds = [...new Set(videoMatches.map((v) => v[1]))].slice(0, 10);
-
-          for (const videoId of uniqueIds) {
-            try {
-              const oeRes = await fetch(
-                `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
-              );
-              if (oeRes.ok) {
-                const oeData = await oeRes.json();
-                const vTitle = oeData.title || `Video ${videoId}`;
-                const contentUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-                let cType = "long_form";
-                const tLower = vTitle.toLowerCase();
-                if (tLower.includes("cover") || tLower.includes("歌ってみた")) {
-                  cType = "music_cover";
-                } else if (tLower.includes("original") || tLower.includes("mv")) {
-                  cType = "original_song";
-                } else if (tLower.includes("stream") || tLower.includes("live")) {
-                  cType = "livestream";
-                }
-
-                // Check or insert into contents
-                const [existContent] = await db
-                  .select()
-                  .from(contents)
-                  .where(
-                    and(
-                      eq(contents.platformId, platformRecord.id),
-                      eq(contents.externalId, videoId)
-                    )
-                  );
-
-                let contentId: number;
-                if (!existContent) {
-                  const [newContent] = await db
-                    .insert(contents)
-                    .values({
-                      platformId: platformRecord.id,
-                      externalId: videoId,
-                      title: vTitle,
-                      contentType: cType,
-                      contentUrl,
-                      publishedAt: now,
-                    })
-                    .returning();
-                  contentId = newContent.id;
-                  videosImported++;
-                } else {
-                  contentId = existContent.id;
-                }
-              }
-            } catch (vErr) {
-              // Ignore single video fetch failure
-            }
-          }
-        }
-      } catch (scrapeErr) {
-        console.warn("Public channel scrape warning:", scrapeErr);
-      }
+    // 3. Immediately trigger automated real-time sync into Neon
+    let syncRes;
+    try {
+      syncRes = await syncConnectedAccount(account.id);
+    } catch (syncErr: any) {
+      console.warn("Immediate sync warning upon connection:", syncErr);
     }
 
+    const itemsProcessed = syncRes?.itemsProcessed || 0;
+    const snapshotsCreated = syncRes?.snapshotsCreated || 0;
+
     const message =
-      videosImported > 0
-        ? `Channel ${displayName} connected and synced ${videosImported} public videos to your catalog!`
-        : `Channel ${displayName} connected successfully!`;
+      itemsProcessed > 0
+        ? `Channel "${displayName}" connected! Synced ${itemsProcessed} videos and ${snapshotsCreated} live metric snapshots to Neon PostgreSQL.`
+        : `Channel "${displayName}" connected successfully!`;
 
     return NextResponse.json({
       success: true,
       message,
       account,
-      videosImported,
+      videosImported: itemsProcessed,
+      syncResult: syncRes,
     });
   } catch (err: any) {
     console.error("Instant connect error:", err);
@@ -182,4 +125,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-

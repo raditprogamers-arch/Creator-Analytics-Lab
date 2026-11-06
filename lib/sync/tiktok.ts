@@ -231,6 +231,8 @@ export async function syncTikTokAccount(accountId: number): Promise<SyncResult> 
             contentType: "short_form",
             publishedAt,
             contentUrl,
+            createdAt: now,
+            updatedAt: now,
           })
           .returning();
         contentId = created.id;
@@ -251,6 +253,7 @@ export async function syncTikTokAccount(accountId: number): Promise<SyncResult> 
           metricName: mName,
           metricValue: String(mVal),
           capturedAt: now,
+          createdAt: now,
         });
         snapshotsCreated++;
       }

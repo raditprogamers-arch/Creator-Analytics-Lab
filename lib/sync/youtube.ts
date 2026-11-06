@@ -200,29 +200,173 @@ export async function refreshYouTubeAccessToken(account: ConnectedAccount): Prom
   return newAccessToken;
 }
 
+function parseViewCount(str: string | null | undefined): number {
+  if (!str) return 0;
+  const clean = str.replace(/\u00a0/g, " ").replace(/views?/i, "").trim();
+  const kMatch = clean.match(/([\d\.]+)\s*(k|thousand)/i);
+  if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1000);
+  const mMatch = clean.match(/([\d\.]+)\s*(m|million)/i);
+  if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1000000);
+  const bMatch = clean.match(/([\d\.]+)\s*(b|billion)/i);
+  if (bMatch) return Math.round(parseFloat(bMatch[1]) * 1000000000);
+  const num = parseInt(clean.replace(/[,\.]/g, ""), 10);
+  return isNaN(num) ? 0 : num;
+}
+
+function parseRelativeDate(text: string | null | undefined): Date {
+  const now = new Date();
+  if (!text) return now;
+  const lower = text.toLowerCase();
+  const match = lower.match(
+    /(\d+)\s*(second|sec|minute|min|hour|hr|day|d|week|wk|month|mo|year|yr)/
+  );
+  if (!match) return now;
+  const num = parseInt(match[1], 10);
+  const unit = match[2];
+  const d = new Date(now.getTime());
+  if (unit.startsWith("sec")) d.setSeconds(d.getSeconds() - num);
+  else if (unit.startsWith("min")) d.setMinutes(d.getMinutes() - num);
+  else if (unit.startsWith("hour") || unit === "hr") d.setHours(d.getHours() - num);
+  else if (unit.startsWith("day") || unit === "d") d.setDate(d.getDate() - num);
+  else if (unit.startsWith("week") || unit === "wk") d.setDate(d.getDate() - num * 7);
+  else if (unit.startsWith("month") || unit === "mo") d.setMonth(d.getMonth() - num);
+  else if (unit.startsWith("year") || unit === "yr") d.setFullYear(d.getFullYear() - num);
+  return d;
+}
+
 export async function syncYouTubePublicChannel(account: ConnectedAccount): Promise<SyncResult> {
-  const cleanHandle = account.accountIdentifier.replace(/^@/, "");
+  let cleanHandle = account.accountIdentifier.trim();
+  if (cleanHandle.includes("youtube.com/") || cleanHandle.includes("youtu.be/")) {
+    const m =
+      cleanHandle.match(/@([a-zA-Z0-9_\-\.]+)/) ||
+      cleanHandle.match(/(?:channel|c|user)\/([a-zA-Z0-9_\-\.]+)/);
+    if (m) cleanHandle = m[1];
+  }
+  cleanHandle = cleanHandle.replace(/^@/, "").replace(/\/$/, "").replace(/\/videos$/, "");
   const now = new Date();
 
-  const ytRes = await fetch(`https://www.youtube.com/@${cleanHandle}`, {
+  // Determine target URL: handles vs channel IDs
+  let targetUrl = `https://www.youtube.com/@${cleanHandle}/videos`;
+  if (cleanHandle.startsWith("UC") && cleanHandle.length === 24) {
+    targetUrl = `https://www.youtube.com/channel/${cleanHandle}/videos`;
+  }
+
+  let ytRes = await fetch(targetUrl, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
     },
   });
+
+  // Fallback to channel root if /videos returns non-200
+  if (!ytRes.ok) {
+    targetUrl =
+      cleanHandle.startsWith("UC") && cleanHandle.length === 24
+        ? `https://www.youtube.com/channel/${cleanHandle}`
+        : `https://www.youtube.com/@${cleanHandle}`;
+    ytRes = await fetch(targetUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+  }
 
   if (!ytRes.ok) {
     throw new Error(`Could not access public YouTube channel for @${cleanHandle}`);
   }
 
   const html = await ytRes.text();
-  const videoMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_\-]{11})"/g)];
-  const uniqueIds = [...new Set(videoMatches.map((v) => v[1]))].slice(0, 15);
+  const jsonMatch =
+    html.match(/var ytInitialData = ({.*?});<\/script>/s) ||
+    html.match(/ytInitialData\s*=\s*({.*?});/s);
 
-  if (uniqueIds.length === 0) {
+  interface ExtractedVideo {
+    videoId: string;
+    title: string;
+    views: number;
+    publishedAt: Date;
+    timeText?: string;
+  }
+
+  const videoList: ExtractedVideo[] = [];
+  const seenIds = new Set<string>();
+
+  if (jsonMatch) {
+    try {
+      const data = JSON.parse(jsonMatch[1]);
+      function walk(obj: any) {
+        if (!obj || typeof obj !== "object") return;
+        if (obj.lockupViewModel) {
+          const vm = obj.lockupViewModel;
+          const videoId = vm.contentId;
+          const title = vm.metadata?.lockupMetadataViewModel?.title?.content || "";
+          let viewCount = 0;
+          let timeText = "";
+
+          const metadataRows =
+            vm.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows ||
+            [];
+          for (const row of metadataRows) {
+            for (const part of row.metadataParts || []) {
+              const label = part.accessibilityLabel || "";
+              const content = part.text?.content || "";
+              if (
+                label.toLowerCase().includes("view") ||
+                part.leadingIcon?.name?.includes("PLAY")
+              ) {
+                viewCount = parseViewCount(label || content);
+              } else if (
+                label.toLowerCase().includes("ago") ||
+                content.toLowerCase().includes("ago")
+              ) {
+                timeText = label || content;
+              }
+            }
+          }
+
+          if (videoId && title && !seenIds.has(videoId)) {
+            seenIds.add(videoId);
+            videoList.push({
+              videoId,
+              title,
+              views: viewCount,
+              publishedAt: parseRelativeDate(timeText),
+              timeText,
+            });
+          }
+        }
+        for (const k of Object.keys(obj)) walk(obj[k]);
+      }
+      walk(data);
+    } catch (e) {
+      console.warn("ytInitialData parsing warning:", e);
+    }
+  }
+
+  // Fallback: regex search for videoId if tree walk returned 0
+  if (videoList.length === 0) {
+    const videoMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_\-]{11})"/g)];
+    const uniqueIds = [...new Set(videoMatches.map((v) => v[1]))].slice(0, 20);
+    for (const vId of uniqueIds) {
+      if (!seenIds.has(vId)) {
+        seenIds.add(vId);
+        videoList.push({
+          videoId: vId,
+          title: `YouTube Video ${vId}`,
+          views: 0,
+          publishedAt: now,
+        });
+      }
+    }
+  }
+
+  if (videoList.length === 0) {
     await db
       .update(connectedAccounts)
-      .set({ syncStatus: "success", lastSyncedAt: now, syncError: null })
+      .set({ syncStatus: "success", lastSyncedAt: now, syncError: null, updatedAt: now })
       .where(eq(connectedAccounts.id, account.id));
 
     return {
@@ -239,29 +383,17 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
   let newItemsCreated = 0;
   let snapshotsCreated = 0;
 
-  for (const videoId of uniqueIds) {
+  // For the top 8 videos, fetch watch page to get exact likes and ISO date
+  const topSlice = videoList.slice(0, 8);
+  for (const item of topSlice) {
     try {
-      let vTitle = `YouTube Video ${videoId}`;
-      const oeRes = await fetch(
-        `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
-      );
-      if (oeRes.ok) {
-        const oeData = await oeRes.json();
-        if (oeData.title) vTitle = oeData.title;
-      }
-
-      // Fetch watch page to extract real-time live viewCount and likeCount
-      const watchRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      const watchRes = await fetch(`https://www.youtube.com/watch?v=${item.videoId}`, {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept-Language": "en-US,en;q=0.9",
         },
       });
-
-      let views = 0;
-      let likes = 0;
-      let publishedAt = now;
-
       if (watchRes.ok) {
         const watchHtml = await watchRes.text();
         const viewMatch =
@@ -269,7 +401,7 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
           watchHtml.match(/"views":{"simpleText":"([^"]+)"/);
         if (viewMatch) {
           const num = parseInt(viewMatch[1].replace(/,/g, ""), 10);
-          if (!isNaN(num)) views = num;
+          if (!isNaN(num) && num > 0) item.views = num;
         }
 
         const likeMatch =
@@ -278,7 +410,7 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
           ) || watchHtml.match(/"likeCount":"(\d+)"/);
         if (likeMatch) {
           const num = parseInt(likeMatch[1].replace(/,/g, ""), 10);
-          if (!isNaN(num)) likes = num;
+          if (!isNaN(num)) (item as any).likes = num;
         }
 
         const dateMatch =
@@ -286,13 +418,22 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
           watchHtml.match(/"dateText":{"simpleText":"([^"]+)"/);
         if (dateMatch) {
           const d = new Date(dateMatch[1]);
-          if (!isNaN(d.getTime())) publishedAt = d;
+          if (!isNaN(d.getTime())) item.publishedAt = d;
         }
       }
+    } catch {}
+  }
 
+  // Insert or update all extracted videos into contents & metric_snapshots
+  for (const item of videoList) {
+    try {
       let contentType = "long_form";
-      const tLower = vTitle.toLowerCase();
-      if (tLower.includes("cover") || tLower.includes("歌ってみた")) {
+      const tLower = item.title.toLowerCase();
+      if (
+        tLower.includes("cover") ||
+        tLower.includes("歌ってみた") ||
+        tLower.includes("nyanyi")
+      ) {
         contentType = "music_cover";
       } else if (tLower.includes("original") || tLower.includes("mv")) {
         contentType = "original_song";
@@ -310,7 +451,7 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
         .where(
           and(
             eq(contents.platformId, account.platformId),
-            eq(contents.externalId, videoId)
+            eq(contents.externalId, item.videoId)
           )
         );
 
@@ -320,9 +461,9 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
         await db
           .update(contents)
           .set({
-            title: vTitle,
+            title: item.title,
             contentType: existingContent.contentType || contentType,
-            publishedAt,
+            publishedAt: item.publishedAt,
             updatedAt: now,
           })
           .where(eq(contents.id, contentId));
@@ -331,11 +472,11 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
           .insert(contents)
           .values({
             platformId: account.platformId,
-            externalId: videoId,
-            title: vTitle,
+            externalId: item.videoId,
+            title: item.title,
             contentType,
-            publishedAt,
-            contentUrl: `https://www.youtube.com/watch?v=${videoId}`,
+            publishedAt: item.publishedAt,
+            contentUrl: `https://www.youtube.com/watch?v=${item.videoId}`,
             createdAt: now,
             updatedAt: now,
           })
@@ -348,13 +489,14 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
       await db.insert(metricSnapshots).values({
         contentId,
         metricName: "views",
-        metricValue: String(views),
+        metricValue: String(item.views),
         capturedAt: now,
         createdAt: now,
       });
       snapshotsCreated++;
 
-      if (likes > 0) {
+      const likes = (item as any).likes;
+      if (typeof likes === "number" && likes > 0) {
         await db.insert(metricSnapshots).values({
           contentId,
           metricName: "likes",
@@ -365,7 +507,7 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
         snapshotsCreated++;
       }
     } catch (vErr) {
-      console.warn(`Error syncing video ${videoId}:`, vErr);
+      console.warn(`Error storing video ${item.videoId}:`, vErr);
     }
   }
 
@@ -383,7 +525,7 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
     success: true,
     accountId: account.id,
     platformName: "YouTube",
-    itemsProcessed: uniqueIds.length,
+    itemsProcessed: videoList.length,
     newItemsCreated,
     snapshotsCreated,
     syncedAt: now.toISOString(),
@@ -402,7 +544,30 @@ export async function syncYouTubeAccount(accountId: number): Promise<SyncResult>
 
   // Zero-setup Instant Connect mode without Google OAuth:
   if (!account.refreshToken) {
-    return syncYouTubePublicChannel(account);
+    try {
+      return await syncYouTubePublicChannel(account);
+    } catch (err: any) {
+      console.error("Public YouTube sync error:", err);
+      await db
+        .update(connectedAccounts)
+        .set({
+          syncStatus: "failed",
+          syncError: err.message || "Failed to sync YouTube public channel",
+          updatedAt: new Date(),
+        })
+        .where(eq(connectedAccounts.id, accountId));
+
+      return {
+        success: false,
+        accountId,
+        platformName: "YouTube",
+        itemsProcessed: 0,
+        newItemsCreated: 0,
+        snapshotsCreated: 0,
+        syncedAt: new Date().toISOString(),
+        error: err.message,
+      };
+    }
   }
 
   // Update status to syncing

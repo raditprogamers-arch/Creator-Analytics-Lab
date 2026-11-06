@@ -43,8 +43,10 @@ export function InstantConnect({ onSuccess }: InstantConnectProps) {
       setHandle("");
       setChannelTitle("");
       if (onSuccess) onSuccess();
-      // Force reload to show in connected cards
-      window.location.reload();
+      // Brief delay so the user sees the success confirmation before page reload
+      setTimeout(() => {
+        window.location.reload();
+      }, 1200);
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to connect");
     } finally {

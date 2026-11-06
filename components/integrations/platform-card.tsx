@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   CheckCircle2,
   AlertCircle,
@@ -53,11 +53,18 @@ export function PlatformCard({
   connectedAccount,
   onRefresh,
 }: PlatformCardProps) {
+  const [currentAccount, setCurrentAccount] = useState<ConnectedAccountData | null>(
+    connectedAccount ?? null
+  );
   const [showSetup, setShowSetup] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [copied, setCopied] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCurrentAccount(connectedAccount ?? null);
+  }, [connectedAccount]);
 
   const handleCopyUri = () => {
     navigator.clipboard.writeText(redirectUri);
@@ -66,7 +73,7 @@ export function PlatformCard({
   };
 
   const handleSyncNow = async () => {
-    if (!connectedAccount) return;
+    if (!currentAccount) return;
     setSyncing(true);
     setSyncMessage(null);
 
@@ -74,7 +81,7 @@ export function PlatformCard({
       const res = await fetch("/api/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId: connectedAccount.id }),
+        body: JSON.stringify({ accountId: currentAccount.id }),
       });
 
       const data = await res.json();
@@ -84,7 +91,11 @@ export function PlatformCard({
       setSyncMessage(
         `Synced! Processed ${data.itemsProcessed} items (${data.snapshotsCreated} metric snapshots updated).`
       );
-      if (onRefresh) onRefresh();
+      if (onRefresh) {
+        onRefresh();
+      } else {
+        setTimeout(() => window.location.reload(), 1200);
+      }
     } catch (err: any) {
       setSyncMessage(`Error: ${err.message}`);
     } finally {
@@ -93,19 +104,25 @@ export function PlatformCard({
   };
 
   const handleDisconnect = async () => {
-    if (!connectedAccount) return;
-    if (!confirm(`Are you sure you want to disconnect ${connectedAccount.accountName}?`)) {
+    if (!currentAccount) return;
+    if (!confirm(`Are you sure you want to disconnect ${currentAccount.accountName}?`)) {
       return;
     }
 
     setDisconnecting(true);
     try {
-      const res = await fetch(`/api/sync?id=${connectedAccount.id}`, { method: "DELETE" });
+      const res = await fetch(`/api/sync?id=${currentAccount.id}`, { method: "DELETE" });
       const data = await res.json();
       if (!data.success) {
         throw new Error(data.error || "Failed to disconnect");
       }
-      if (onRefresh) onRefresh();
+      setCurrentAccount(null);
+      setSyncMessage(null);
+      if (onRefresh) {
+        onRefresh();
+      } else {
+        window.location.reload();
+      }
     } catch (err: any) {
       alert("Error: " + err.message);
     } finally {
@@ -115,9 +132,9 @@ export function PlatformCard({
 
   // Parse metadata if available
   let meta: any = {};
-  if (connectedAccount?.metadata) {
+  if (currentAccount?.metadata) {
     try {
-      meta = JSON.parse(connectedAccount.metadata);
+      meta = JSON.parse(currentAccount.metadata);
     } catch {}
   }
 
@@ -127,7 +144,9 @@ export function PlatformCard({
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${brandColor} text-white shadow-lg`}>
+            <div
+              className={`w-12 h-12 rounded-xl flex items-center justify-center ${brandColor} text-white shadow-lg`}
+            >
               {icon}
             </div>
             <div>
@@ -137,7 +156,7 @@ export function PlatformCard({
           </div>
 
           <div>
-            {connectedAccount ? (
+            {currentAccount ? (
               <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5" /> Connected
               </span>
@@ -154,27 +173,31 @@ export function PlatformCard({
         </div>
 
         {/* Connection State Info */}
-        {connectedAccount ? (
+        {currentAccount ? (
           <div className="mt-5 p-4 rounded-lg bg-slate-950/80 border border-slate-800 text-xs space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-slate-500">Connected Channel / Handle:</span>
-              <span className="font-semibold text-slate-200">{connectedAccount.accountName}</span>
+              <span className="font-semibold text-slate-200">{currentAccount.accountName}</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-slate-500">Account ID:</span>
-              <span className="font-mono text-slate-400 text-[11px]">{connectedAccount.accountIdentifier}</span>
+              <span className="font-mono text-slate-400 text-[11px]">
+                {currentAccount.accountIdentifier}
+              </span>
             </div>
             {meta.subscriberCount && (
               <div className="flex items-center justify-between">
                 <span className="text-slate-500">Audience:</span>
-                <span className="font-mono text-indigo-400">{Number(meta.subscriberCount).toLocaleString()} Subscribers</span>
+                <span className="font-mono text-indigo-400">
+                  {Number(meta.subscriberCount).toLocaleString()} Subscribers
+                </span>
               </div>
             )}
             <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
               <span className="text-slate-500">Last Synced:</span>
               <span className="text-slate-300 font-mono text-[11px]">
-                {connectedAccount.lastSyncedAt
-                  ? new Date(connectedAccount.lastSyncedAt).toLocaleString()
+                {currentAccount.lastSyncedAt
+                  ? new Date(currentAccount.lastSyncedAt).toLocaleString()
                   : "Never"}
               </span>
             </div>
@@ -182,7 +205,9 @@ export function PlatformCard({
         ) : (
           <div className="mt-5 p-4 rounded-lg bg-slate-950/40 border border-slate-800/80 text-xs text-slate-400">
             {isConfigured ? (
-              <p>Your API keys are configured. Click the button below to authorize your account via official OAuth 2.0.</p>
+              <p>
+                Your API keys are configured. Click the button below to authorize your account via official OAuth 2.0.
+              </p>
             ) : (
               <div>
                 <p className="text-amber-300/90 font-medium mb-1 flex items-center gap-1.5">
@@ -190,7 +215,10 @@ export function PlatformCard({
                 </p>
                 <div className="flex flex-wrap gap-1.5 mt-1 font-mono text-[11px] text-slate-300">
                   {requiredEnvVars.map((v) => (
-                    <span key={v} className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">
+                    <span
+                      key={v}
+                      className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700"
+                    >
                       {v}
                     </span>
                   ))}
@@ -200,9 +228,17 @@ export function PlatformCard({
           </div>
         )}
 
-        {syncMessage && (
-          <div className="mt-3 p-2.5 rounded bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs">
-            {syncMessage}
+        {/* Sync message or error if present */}
+        {(syncMessage || currentAccount?.syncError) && (
+          <div
+            className={`mt-3 p-2.5 rounded text-xs flex items-center gap-2 ${
+              syncMessage?.startsWith("Synced")
+                ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-300"
+                : "bg-rose-500/10 border border-rose-500/20 text-rose-300"
+            }`}
+          >
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+            <span>{syncMessage || currentAccount?.syncError}</span>
           </div>
         )}
       </div>
@@ -210,7 +246,7 @@ export function PlatformCard({
       {/* Action Buttons & Accordion */}
       <div className="p-6 pt-0 space-y-3">
         <div className="flex items-center gap-3">
-          {connectedAccount ? (
+          {currentAccount ? (
             <>
               <button
                 onClick={handleSyncNow}
@@ -262,7 +298,9 @@ export function PlatformCard({
         {showSetup && (
           <div className="mt-3 p-4 rounded-lg bg-slate-950 border border-slate-800 text-xs space-y-3">
             <div>
-              <span className="text-slate-400 font-semibold block mb-1">Authorized Redirect URI:</span>
+              <span className="text-slate-400 font-semibold block mb-1">
+                Authorized Redirect URI:
+              </span>
               <div className="flex items-center gap-2">
                 <input
                   type="text"
@@ -275,7 +313,11 @@ export function PlatformCard({
                   className="p-1 text-slate-400 hover:text-slate-200 bg-slate-800 rounded border border-slate-700"
                   title="Copy Redirect URI"
                 >
-                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
                 </button>
               </div>
             </div>
@@ -296,4 +338,3 @@ export function PlatformCard({
     </div>
   );
 }
-
