@@ -16,10 +16,12 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Node / Neon
+# Node / Next.js / Neon
 node_modules/
+.next/
 dist/
 .neon
+next-env.d.ts
 
 # IDE & OS
 .vscode/
