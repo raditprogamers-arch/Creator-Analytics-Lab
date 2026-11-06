@@ -336,6 +336,8 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
             contentType,
             publishedAt,
             contentUrl: `https://www.youtube.com/watch?v=${videoId}`,
+            createdAt: now,
+            updatedAt: now,
           })
           .returning();
         contentId = created.id;
@@ -348,6 +350,7 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
         metricName: "views",
         metricValue: String(views),
         capturedAt: now,
+        createdAt: now,
       });
       snapshotsCreated++;
 
@@ -357,6 +360,7 @@ export async function syncYouTubePublicChannel(account: ConnectedAccount): Promi
           metricName: "likes",
           metricValue: String(likes),
           capturedAt: now,
+          createdAt: now,
         });
         snapshotsCreated++;
       }
@@ -397,7 +401,7 @@ export async function syncYouTubeAccount(accountId: number): Promise<SyncResult>
   }
 
   // Zero-setup Instant Connect mode without Google OAuth:
-  if (!account.refreshToken && !account.accessToken) {
+  if (!account.refreshToken) {
     return syncYouTubePublicChannel(account);
   }
 
@@ -411,7 +415,12 @@ export async function syncYouTubeAccount(accountId: number): Promise<SyncResult>
     let token = account.accessToken;
     // Check if expired
     if (!token || (account.tokenExpiresAt && new Date(account.tokenExpiresAt) <= new Date())) {
-      token = await refreshYouTubeAccessToken(account);
+      try {
+        token = await refreshYouTubeAccessToken(account);
+      } catch (err) {
+        console.warn("OAuth refresh failed, falling back to public sync:", err);
+        return syncYouTubePublicChannel(account);
+      }
     }
 
     // 1. Get uploads playlist
