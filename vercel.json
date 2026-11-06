@@ -1,5 +1,10 @@
 {
   "framework": "nextjs",
-  "buildCommand": "next build --webpack"
+  "buildCommand": "next build --webpack",
+  "crons": [
+    {
+      "path": "/api/sync/cron",
+      "schedule": "0 * * * *"
+    }
+  ]
 }
-

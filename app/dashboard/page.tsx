@@ -1,4 +1,7 @@
 import Link from "next/link";
+import { db } from "@/lib/db";
+import { connectedAccounts } from "@/lib/db/schema";
+import { syncConnectedAccount } from "@/lib/sync";
 import {
   getOverviewKpis,
   getPlatformSummaries,
@@ -24,6 +27,21 @@ import { formatNumber, formatPercentage } from "@/lib/utils";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
+  // Automated background sync check (real-time telemetry refresh)
+  try {
+    const accounts = await db.select().from(connectedAccounts);
+    for (const acc of accounts) {
+      const minutesAgo = acc.lastSyncedAt
+        ? (Date.now() - new Date(acc.lastSyncedAt).getTime()) / (1000 * 60)
+        : 999;
+      if (minutesAgo > 15) {
+        syncConnectedAccount(acc.id).catch((err) =>
+          console.warn(`Automated sync warning for account #${acc.id}:`, err)
+        );
+      }
+    }
+  } catch {}
+
   const [kpis, platformSummaries, timeline, contentTypes] = await Promise.all([
     getOverviewKpis().catch(() => ({
       totalContent: 0,

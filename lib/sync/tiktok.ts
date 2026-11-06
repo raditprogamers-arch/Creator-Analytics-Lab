@@ -151,6 +151,23 @@ export async function syncTikTokAccount(accountId: number): Promise<SyncResult> 
     throw new Error(`Connected account #${accountId} not found.`);
   }
 
+  if (!account.accessToken) {
+    const now = new Date();
+    await db
+      .update(connectedAccounts)
+      .set({ syncStatus: "success", lastSyncedAt: now, syncError: null })
+      .where(eq(connectedAccounts.id, accountId));
+    return {
+      success: true,
+      accountId,
+      platformName: "TikTok",
+      itemsProcessed: 0,
+      newItemsCreated: 0,
+      snapshotsCreated: 0,
+      syncedAt: now.toISOString(),
+    };
+  }
+
   await db
     .update(connectedAccounts)
     .set({ syncStatus: "syncing", syncError: null })

@@ -200,6 +200,192 @@ export async function refreshYouTubeAccessToken(account: ConnectedAccount): Prom
   return newAccessToken;
 }
 
+export async function syncYouTubePublicChannel(account: ConnectedAccount): Promise<SyncResult> {
+  const cleanHandle = account.accountIdentifier.replace(/^@/, "");
+  const now = new Date();
+
+  const ytRes = await fetch(`https://www.youtube.com/@${cleanHandle}`, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
+  });
+
+  if (!ytRes.ok) {
+    throw new Error(`Could not access public YouTube channel for @${cleanHandle}`);
+  }
+
+  const html = await ytRes.text();
+  const videoMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_\-]{11})"/g)];
+  const uniqueIds = [...new Set(videoMatches.map((v) => v[1]))].slice(0, 15);
+
+  if (uniqueIds.length === 0) {
+    await db
+      .update(connectedAccounts)
+      .set({ syncStatus: "success", lastSyncedAt: now, syncError: null })
+      .where(eq(connectedAccounts.id, account.id));
+
+    return {
+      success: true,
+      accountId: account.id,
+      platformName: "YouTube",
+      itemsProcessed: 0,
+      newItemsCreated: 0,
+      snapshotsCreated: 0,
+      syncedAt: now.toISOString(),
+    };
+  }
+
+  let newItemsCreated = 0;
+  let snapshotsCreated = 0;
+
+  for (const videoId of uniqueIds) {
+    try {
+      let vTitle = `YouTube Video ${videoId}`;
+      const oeRes = await fetch(
+        `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
+      );
+      if (oeRes.ok) {
+        const oeData = await oeRes.json();
+        if (oeData.title) vTitle = oeData.title;
+      }
+
+      // Fetch watch page to extract real-time live viewCount and likeCount
+      const watchRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+      });
+
+      let views = 0;
+      let likes = 0;
+      let publishedAt = now;
+
+      if (watchRes.ok) {
+        const watchHtml = await watchRes.text();
+        const viewMatch =
+          watchHtml.match(/"viewCount":"(\d+)"/) ||
+          watchHtml.match(/"views":{"simpleText":"([^"]+)"/);
+        if (viewMatch) {
+          const num = parseInt(viewMatch[1].replace(/,/g, ""), 10);
+          if (!isNaN(num)) views = num;
+        }
+
+        const likeMatch =
+          watchHtml.match(
+            /"defaultText":{"accessibility":{"accessibilityData":{"label":"([0-9,]+) likes"/
+          ) || watchHtml.match(/"likeCount":"(\d+)"/);
+        if (likeMatch) {
+          const num = parseInt(likeMatch[1].replace(/,/g, ""), 10);
+          if (!isNaN(num)) likes = num;
+        }
+
+        const dateMatch =
+          watchHtml.match(/"publishDate":"([^"]+)"/) ||
+          watchHtml.match(/"dateText":{"simpleText":"([^"]+)"/);
+        if (dateMatch) {
+          const d = new Date(dateMatch[1]);
+          if (!isNaN(d.getTime())) publishedAt = d;
+        }
+      }
+
+      let contentType = "long_form";
+      const tLower = vTitle.toLowerCase();
+      if (tLower.includes("cover") || tLower.includes("歌ってみた")) {
+        contentType = "music_cover";
+      } else if (tLower.includes("original") || tLower.includes("mv")) {
+        contentType = "original_song";
+      } else if (
+        tLower.includes("stream") ||
+        tLower.includes("live") ||
+        tLower.includes("karaoke")
+      ) {
+        contentType = "livestream";
+      }
+
+      const [existingContent] = await db
+        .select()
+        .from(contents)
+        .where(
+          and(
+            eq(contents.platformId, account.platformId),
+            eq(contents.externalId, videoId)
+          )
+        );
+
+      let contentId: number;
+      if (existingContent) {
+        contentId = existingContent.id;
+        await db
+          .update(contents)
+          .set({
+            title: vTitle,
+            contentType: existingContent.contentType || contentType,
+            publishedAt,
+            updatedAt: now,
+          })
+          .where(eq(contents.id, contentId));
+      } else {
+        const [created] = await db
+          .insert(contents)
+          .values({
+            platformId: account.platformId,
+            externalId: videoId,
+            title: vTitle,
+            contentType,
+            publishedAt,
+            contentUrl: `https://www.youtube.com/watch?v=${videoId}`,
+          })
+          .returning();
+        contentId = created.id;
+        newItemsCreated++;
+      }
+
+      // Record point-in-time metric snapshots
+      await db.insert(metricSnapshots).values({
+        contentId,
+        metricName: "views",
+        metricValue: String(views),
+        capturedAt: now,
+      });
+      snapshotsCreated++;
+
+      if (likes > 0) {
+        await db.insert(metricSnapshots).values({
+          contentId,
+          metricName: "likes",
+          metricValue: String(likes),
+          capturedAt: now,
+        });
+        snapshotsCreated++;
+      }
+    } catch (vErr) {
+      console.warn(`Error syncing video ${videoId}:`, vErr);
+    }
+  }
+
+  await db
+    .update(connectedAccounts)
+    .set({
+      syncStatus: "success",
+      lastSyncedAt: now,
+      syncError: null,
+      updatedAt: now,
+    })
+    .where(eq(connectedAccounts.id, account.id));
+
+  return {
+    success: true,
+    accountId: account.id,
+    platformName: "YouTube",
+    itemsProcessed: uniqueIds.length,
+    newItemsCreated,
+    snapshotsCreated,
+    syncedAt: now.toISOString(),
+  };
+}
+
 export async function syncYouTubeAccount(accountId: number): Promise<SyncResult> {
   const [account] = await db
     .select()
@@ -208,6 +394,11 @@ export async function syncYouTubeAccount(accountId: number): Promise<SyncResult>
 
   if (!account) {
     throw new Error(`Connected account #${accountId} not found.`);
+  }
+
+  // Zero-setup Instant Connect mode without Google OAuth:
+  if (!account.refreshToken && !account.accessToken) {
+    return syncYouTubePublicChannel(account);
   }
 
   // Update status to syncing
