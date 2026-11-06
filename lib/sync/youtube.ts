@@ -1,0 +1,411 @@
+import { db } from "../db";
+import {
+  connectedAccounts,
+  contents,
+  metricSnapshots,
+  platforms,
+  type ConnectedAccount,
+} from "../db/schema";
+import { eq, and } from "drizzle-orm";
+import { SyncResult } from "./types";
+
+export function getYouTubeConfig() {
+  const clientId = process.env.YOUTUBE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "";
+  const clientSecret =
+    process.env.YOUTUBE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || "";
+  const appUrl =
+    process.env.NEXT_PUBLIC_APP_URL ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000");
+  const redirectUri = `${appUrl}/api/auth/callback/youtube`;
+
+  return {
+    clientId,
+    clientSecret,
+    redirectUri,
+    isConfigured: Boolean(clientId && clientSecret),
+  };
+}
+
+export function getYouTubeAuthUrl(state?: string): string {
+  const { clientId, redirectUri } = getYouTubeConfig();
+  const scopes = [
+    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+    "https://www.googleapis.com/auth/userinfo.profile",
+  ].join(" ");
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: scopes,
+    access_type: "offline",
+    prompt: "consent",
+    state: state || "youtube_auth",
+  });
+
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+
+export async function exchangeYouTubeCode(code: string) {
+  const { clientId, clientSecret, redirectUri } = getYouTubeConfig();
+
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
+      grant_type: "authorization_code",
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    const err = await tokenRes.text();
+    throw new Error(`Failed to exchange YouTube authorization code: ${err}`);
+  }
+
+  const tokenData = await tokenRes.json();
+  const { access_token, refresh_token, expires_in, scope } = tokenData;
+
+  // Fetch channel info
+  const channelRes = await fetch(
+    "https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true",
+    {
+      headers: { Authorization: `Bearer ${access_token}` },
+    }
+  );
+
+  if (!channelRes.ok) {
+    const err = await channelRes.text();
+    throw new Error(`Failed to fetch YouTube channel details: ${err}`);
+  }
+
+  const channelData = await channelRes.json();
+  const channel = channelData.items?.[0];
+
+  if (!channel) {
+    throw new Error("No YouTube channel found for this Google account.");
+  }
+
+  // Get or create YouTube platform in Neon
+  let [platformRecord] = await db
+    .select()
+    .from(platforms)
+    .where(eq(platforms.name, "YouTube"));
+
+  if (!platformRecord) {
+    [platformRecord] = await db
+      .insert(platforms)
+      .values({ name: "YouTube", platformType: "video" })
+      .returning();
+  }
+
+  const expiresAt = new Date(Date.now() + (expires_in || 3600) * 1000);
+
+  // Check if account already exists
+  const [existing] = await db
+    .select()
+    .from(connectedAccounts)
+    .where(
+      and(
+        eq(connectedAccounts.platformId, platformRecord.id),
+        eq(connectedAccounts.accountIdentifier, channel.id)
+      )
+    );
+
+  const metadata = JSON.stringify({
+    customUrl: channel.snippet.customUrl,
+    thumbnails: channel.snippet.thumbnails,
+    subscriberCount: channel.statistics.subscriberCount,
+    viewCount: channel.statistics.viewCount,
+    videoCount: channel.statistics.videoCount,
+  });
+
+  if (existing) {
+    const [updated] = await db
+      .update(connectedAccounts)
+      .set({
+        accountName: channel.snippet.title,
+        accessToken: access_token,
+        refreshToken: refresh_token || existing.refreshToken,
+        tokenExpiresAt: expiresAt,
+        scope,
+        metadata,
+        syncStatus: "idle",
+        syncError: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, existing.id))
+      .returning();
+    return updated;
+  } else {
+    const [created] = await db
+      .insert(connectedAccounts)
+      .values({
+        platformId: platformRecord.id,
+        platformName: "YouTube",
+        accountIdentifier: channel.id,
+        accountName: channel.snippet.title,
+        accessToken: access_token,
+        refreshToken: refresh_token || null,
+        tokenExpiresAt: expiresAt,
+        scope,
+        metadata,
+        syncStatus: "idle",
+      })
+      .returning();
+    return created;
+  }
+}
+
+export async function refreshYouTubeAccessToken(account: ConnectedAccount): Promise<string> {
+  if (!account.refreshToken) {
+    throw new Error("No refresh token available for YouTube account.");
+  }
+
+  const { clientId, clientSecret } = getYouTubeConfig();
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: account.refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Failed to refresh YouTube token: ${err}`);
+  }
+
+  const data = await res.json();
+  const newAccessToken = data.access_token;
+  const expiresAt = new Date(Date.now() + (data.expires_in || 3600) * 1000);
+
+  await db
+    .update(connectedAccounts)
+    .set({
+      accessToken: newAccessToken,
+      tokenExpiresAt: expiresAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(connectedAccounts.id, account.id));
+
+  return newAccessToken;
+}
+
+export async function syncYouTubeAccount(accountId: number): Promise<SyncResult> {
+  const [account] = await db
+    .select()
+    .from(connectedAccounts)
+    .where(eq(connectedAccounts.id, accountId));
+
+  if (!account) {
+    throw new Error(`Connected account #${accountId} not found.`);
+  }
+
+  // Update status to syncing
+  await db
+    .update(connectedAccounts)
+    .set({ syncStatus: "syncing", syncError: null })
+    .where(eq(connectedAccounts.id, accountId));
+
+  try {
+    let token = account.accessToken;
+    // Check if expired
+    if (!token || (account.tokenExpiresAt && new Date(account.tokenExpiresAt) <= new Date())) {
+      token = await refreshYouTubeAccessToken(account);
+    }
+
+    // 1. Get uploads playlist
+    const chRes = await fetch(
+      "https://www.googleapis.com/youtube/v3/channels?part=contentDetails&mine=true",
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    const chData = await chRes.json();
+    const uploadsPlaylistId =
+      chData.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+
+    if (!uploadsPlaylistId) {
+      throw new Error("Could not find uploads playlist for YouTube channel.");
+    }
+
+    // 2. Fetch latest videos from playlist (up to 50)
+    const plRes = await fetch(
+      `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&playlistId=${uploadsPlaylistId}&maxResults=50`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    const plData = await plRes.json();
+    const playlistItems = plData.items || [];
+
+    if (playlistItems.length === 0) {
+      await db
+        .update(connectedAccounts)
+        .set({ syncStatus: "success", lastSyncedAt: new Date() })
+        .where(eq(connectedAccounts.id, accountId));
+      return {
+        success: true,
+        accountId,
+        platformName: "YouTube",
+        itemsProcessed: 0,
+        newItemsCreated: 0,
+        snapshotsCreated: 0,
+        syncedAt: new Date().toISOString(),
+      };
+    }
+
+    const videoIds = playlistItems
+      .map((item: any) => item.contentDetails?.videoId)
+      .filter(Boolean)
+      .join(",");
+
+    // 3. Fetch full statistics for videos
+    const vidRes = await fetch(
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics,contentDetails&id=${videoIds}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    const vidData = await vidRes.json();
+    const videos = vidData.items || [];
+
+    let newItemsCreated = 0;
+    let snapshotsCreated = 0;
+    const now = new Date();
+
+    for (const v of videos) {
+      const externalId = v.id;
+      const title = v.snippet.title;
+      const publishedAt = v.snippet.publishedAt ? new Date(v.snippet.publishedAt) : null;
+      const contentUrl = `https://www.youtube.com/watch?v=${externalId}`;
+
+      // Detect format
+      let contentType = "long_form";
+      const duration = v.contentDetails?.duration || "";
+      if (duration.includes("PT") && !duration.includes("M") && !duration.includes("H")) {
+        // Less than a minute -> likely Short
+        contentType = "short_form";
+      }
+      const titleLower = title.toLowerCase();
+      if (titleLower.includes("cover")) contentType = "music_cover";
+      else if (titleLower.includes("original") || titleLower.includes("mv"))
+        contentType = "original_song";
+      else if (titleLower.includes("stream") || titleLower.includes("live"))
+        contentType = "livestream";
+
+      // Check or create content
+      const [existingContent] = await db
+        .select()
+        .from(contents)
+        .where(
+          and(
+            eq(contents.platformId, account.platformId),
+            eq(contents.externalId, externalId)
+          )
+        );
+
+      let contentId: number;
+      if (existingContent) {
+        contentId = existingContent.id;
+        await db
+          .update(contents)
+          .set({
+            title,
+            contentType: existingContent.contentType || contentType,
+            updatedAt: now,
+          })
+          .where(eq(contents.id, contentId));
+      } else {
+        const [created] = await db
+          .insert(contents)
+          .values({
+            platformId: account.platformId,
+            externalId,
+            title,
+            description: v.snippet.description || null,
+            contentType,
+            publishedAt,
+            contentUrl,
+          })
+          .returning();
+        contentId = created.id;
+        newItemsCreated++;
+      }
+
+      // Record Metric Snapshots
+      const stats = v.statistics || {};
+      const views = Number(stats.viewCount || 0);
+      const likes = Number(stats.likeCount || 0);
+      const comments = Number(stats.commentCount || 0);
+
+      const metricsToRecord: Record<string, number> = {
+        views,
+        likes,
+        comments,
+      };
+
+      for (const [mName, mVal] of Object.entries(metricsToRecord)) {
+        await db.insert(metricSnapshots).values({
+          contentId,
+          metricName: mName,
+          metricValue: String(mVal),
+          capturedAt: now,
+        });
+        snapshotsCreated++;
+      }
+    }
+
+    // Mark account success
+    await db
+      .update(connectedAccounts)
+      .set({
+        syncStatus: "success",
+        lastSyncedAt: now,
+        syncError: null,
+        updatedAt: now,
+      })
+      .where(eq(connectedAccounts.id, accountId));
+
+    return {
+      success: true,
+      accountId,
+      platformName: "YouTube",
+      itemsProcessed: videos.length,
+      newItemsCreated,
+      snapshotsCreated,
+      syncedAt: now.toISOString(),
+    };
+  } catch (err: any) {
+    console.error("YouTube sync error:", err);
+    await db
+      .update(connectedAccounts)
+      .set({
+        syncStatus: "failed",
+        syncError: err.message || "Failed to sync YouTube metrics",
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, accountId));
+
+    return {
+      success: false,
+      accountId,
+      platformName: "YouTube",
+      itemsProcessed: 0,
+      newItemsCreated: 0,
+      snapshotsCreated: 0,
+      syncedAt: new Date().toISOString(),
+      error: err.message,
+    };
+  }
+}
+

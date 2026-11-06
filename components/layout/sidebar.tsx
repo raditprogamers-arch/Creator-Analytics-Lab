@@ -11,6 +11,7 @@ import {
   Database,
   Music2,
   Sparkles,
+  Link2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +21,7 @@ const navigation = [
   { name: "Analytics & Research", href: "/analytics", icon: BarChart3 },
   { name: "Custom Reports", href: "/reports", icon: FileSpreadsheet },
   { name: "Data Ingestion", href: "/imports", icon: UploadCloud },
+  { name: "Live API Connections", href: "/integrations", icon: Link2 },
 ];
 
 export function Sidebar() {

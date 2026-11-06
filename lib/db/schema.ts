@@ -72,10 +72,44 @@ export const metricSnapshots = pgTable(
   ]
 );
 
+export const connectedAccounts = pgTable(
+  "connected_accounts",
+  {
+    id: serial("id").primaryKey(),
+    platformId: integer("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "cascade" }),
+    platformName: varchar("platform_name", { length: 50 }).notNull(),
+    accountIdentifier: varchar("account_identifier", { length: 255 }).notNull(),
+    accountName: varchar("account_name", { length: 255 }).notNull(),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
+    scope: text("scope"),
+    metadata: text("metadata"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    syncStatus: varchar("sync_status", { length: 50 }).default("idle").notNull(),
+    syncError: text("sync_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("uq_connected_platform_account").on(table.platformId, table.accountIdentifier),
+  ]
+);
+
 // Drizzle Relations
 export const platformsRelations = relations(platforms, ({ many }) => ({
   contents: many(contents),
   imports: many(importHistory),
+  connectedAccounts: many(connectedAccounts),
+}));
+
+export const connectedAccountsRelations = relations(connectedAccounts, ({ one }) => ({
+  platform: one(platforms, {
+    fields: [connectedAccounts.platformId],
+    references: [platforms.id],
+  }),
 }));
 
 export const contentsRelations = relations(contents, ({ one, many }) => ({
@@ -113,4 +147,6 @@ export type ImportHistoryItem = typeof importHistory.$inferSelect;
 export type NewImportHistoryItem = typeof importHistory.$inferInsert;
 export type MetricSnapshot = typeof metricSnapshots.$inferSelect;
 export type NewMetricSnapshot = typeof metricSnapshots.$inferInsert;
+export type ConnectedAccount = typeof connectedAccounts.$inferSelect;
+export type NewConnectedAccount = typeof connectedAccounts.$inferInsert;
 
